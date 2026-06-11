@@ -111,13 +111,24 @@ export function computeMultiplicityFromOps(h: number, k: number, l: number, oper
   const pointGroup = extractPointGroup(operations);
   const seen = new Set<string>();
   
+  const hasInversion = pointGroup.some(R => 
+    Math.abs(R[0][0] + 1) < 0.01 && Math.abs(R[1][1] + 1) < 0.01 && Math.abs(R[2][2] + 1) < 0.01 &&
+    Math.abs(R[0][1]) < 0.01 && Math.abs(R[0][2]) < 0.01 &&
+    Math.abs(R[1][0]) < 0.01 && Math.abs(R[1][2]) < 0.01 &&
+    Math.abs(R[2][0]) < 0.01 && Math.abs(R[2][1]) < 0.01
+  );
+  
   for (const R of pointGroup) {
-    const hp = R[0][0] * h + R[0][1] * k + R[0][2] * l;
-    const kp = R[1][0] * h + R[1][1] * k + R[1][2] * l;
-    const lp = R[2][0] * h + R[2][1] * k + R[2][2] * l;
+    const hp = Math.round(R[0][0] * h + R[0][1] * k + R[0][2] * l);
+    const kp = Math.round(R[1][0] * h + R[1][1] * k + R[1][2] * l);
+    const lp = Math.round(R[2][0] * h + R[2][1] * k + R[2][2] * l);
     const key = `${hp},${kp},${lp}`;
     const keyNeg = `${-hp},${-kp},${-lp}`;
-    if (!seen.has(key) && !seen.has(keyNeg)) {
+    if (hasInversion) {
+      if (!seen.has(key) && !seen.has(keyNeg)) {
+        seen.add(key);
+      }
+    } else {
       seen.add(key);
     }
   }
@@ -167,7 +178,7 @@ export function calculateXRDPattern(
   symOps?: SymOp[],
 ): XRDPattern {
   const wasm = getWasm();
-  if (wasm) {
+  if (wasm && !symOps) {
     try {
       const result = wasm.calculate_xrd_pattern(
         JSON.stringify(atoms), JSON.stringify(cell),
@@ -260,7 +271,7 @@ export function calculateStructureFactorDetail(
   symOps?: SymOp[],
 ): StructureFactorDetail {
   const wasm = getWasm();
-  if (wasm) {
+  if (wasm && !symOps) {
     try {
       const result = wasm.calculate_structure_factor_detail(
         JSON.stringify(atoms), JSON.stringify(cell), h, k, l, wavelength

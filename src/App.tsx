@@ -223,26 +223,34 @@ function analyzeSymmetryElement(op: any): { type: string; axis?: [number, number
   if (Math.abs(trace - 1) < 0.01 && Math.abs(det + 1) < 0.01) {
     let normal: [number, number, number] = [0, 0, 0];
     
-    const RminusI = [
-      [R[0][0] - 1, R[0][1], R[0][2]],
-      [R[1][0], R[1][1] - 1, R[1][2]],
-      [R[2][0], R[2][1], R[2][2] - 1],
+    const RplusI = [
+      [R[0][0] + 1, R[0][1], R[0][2]],
+      [R[1][0], R[1][1] + 1, R[1][2]],
+      [R[2][0], R[2][1], R[2][2] + 1],
     ];
     
-    for (let i = 0; i < 3; i++) {
-      const cross: [number, number, number] = [
-        RminusI[(i+1)%3][(i+2)%3] - RminusI[(i+2)%3][(i+1)%3],
-        RminusI[(i+2)%3][i] - RminusI[i][(i+2)%3],
-        RminusI[i][(i+1)%3] - RminusI[(i+1)%3][i],
-      ];
+    const cols = [
+      [RplusI[0][0], RplusI[1][0], RplusI[2][0]],
+      [RplusI[0][1], RplusI[1][1], RplusI[2][1]],
+      [RplusI[0][2], RplusI[1][2], RplusI[2][2]],
+    ];
+    
+    const crosses = [
+      [cols[1][1]*cols[2][2] - cols[1][2]*cols[2][1], cols[1][2]*cols[2][0] - cols[1][0]*cols[2][2], cols[1][0]*cols[2][1] - cols[1][1]*cols[2][0]],
+      [cols[2][1]*cols[0][2] - cols[2][2]*cols[0][1], cols[2][2]*cols[0][0] - cols[2][0]*cols[0][2], cols[2][0]*cols[0][1] - cols[2][1]*cols[0][0]],
+      [cols[0][1]*cols[1][2] - cols[0][2]*cols[1][1], cols[0][2]*cols[1][0] - cols[0][0]*cols[1][2], cols[0][0]*cols[1][1] - cols[0][1]*cols[1][0]],
+    ];
+    
+    let maxMag = 0;
+    for (const cross of crosses) {
       const mag = Math.sqrt(cross[0]*cross[0] + cross[1]*cross[1] + cross[2]*cross[2]);
-      if (mag > 0.01) {
+      if (mag > maxMag) {
+        maxMag = mag;
         normal = cross.map(v => v / mag) as [number, number, number];
-        break;
       }
     }
     
-    if (Math.sqrt(normal[0]*normal[0] + normal[1]*normal[1] + normal[2]*normal[2]) < 0.01) {
+    if (maxMag < 0.01) {
       if (Math.abs(R[0][1]) < 0.01 && Math.abs(R[0][2]) < 0.01 && Math.abs(R[0][0] + 1) < 0.01) {
         normal = [1, 0, 0];
       } else if (Math.abs(R[1][0]) < 0.01 && Math.abs(R[1][2]) < 0.01 && Math.abs(R[1][1] + 1) < 0.01) {
@@ -275,26 +283,38 @@ function analyzeSymmetryElement(op: any): { type: string; axis?: [number, number
   }
   
   if (Math.abs(det - 1) < 0.01) {
-    let axis: [number, number, number] = [0, 0, 1];
     const cosAngle = (trace - 1) / 2;
     const angle = Math.acos(Math.max(-1, Math.min(1, cosAngle)));
     
-    let found = false;
-    for (let i = 0; i < 3; i++) {
-      const col = [R[0][i] - (i===0?1:0), R[1][i] - (i===1?1:0), R[2][i] - (i===2?1:0)];
-      const cross = [
-        col[1] * (R[2][(i+1)%3] - (i===2?1:0)) - col[2] * (R[1][(i+2)%3] - (i===1?1:0)),
-        col[2] * (R[0][(i+2)%3] - (i===0?1:0)) - col[0] * (R[2][(i+0)%3] - (i===2?1:0)),
-        col[0] * (R[1][(i+0)%3] - (i===1?1:0)) - col[1] * (R[0][(i+1)%3] - (i===0?1:0)),
-      ];
+    const RminusI = [
+      [R[0][0] - 1, R[0][1], R[0][2]],
+      [R[1][0], R[1][1] - 1, R[1][2]],
+      [R[2][0], R[2][1], R[2][2] - 1],
+    ];
+    
+    const cols = [
+      [RminusI[0][0], RminusI[1][0], RminusI[2][0]],
+      [RminusI[0][1], RminusI[1][1], RminusI[2][1]],
+      [RminusI[0][2], RminusI[1][2], RminusI[2][2]],
+    ];
+    
+    const crosses = [
+      [cols[1][1]*cols[2][2] - cols[1][2]*cols[2][1], cols[1][2]*cols[2][0] - cols[1][0]*cols[2][2], cols[1][0]*cols[2][1] - cols[1][1]*cols[2][0]],
+      [cols[2][1]*cols[0][2] - cols[2][2]*cols[0][1], cols[2][2]*cols[0][0] - cols[2][0]*cols[0][2], cols[2][0]*cols[0][1] - cols[2][1]*cols[0][0]],
+      [cols[0][1]*cols[1][2] - cols[0][2]*cols[1][1], cols[0][2]*cols[1][0] - cols[0][0]*cols[1][2], cols[0][0]*cols[1][1] - cols[0][1]*cols[1][0]],
+    ];
+    
+    let axis: [number, number, number] = [0, 0, 1];
+    let maxMag = 0;
+    for (const cross of crosses) {
       const mag = Math.sqrt(cross[0]*cross[0] + cross[1]*cross[1] + cross[2]*cross[2]);
-      if (mag > 0.01) {
+      if (mag > maxMag) {
+        maxMag = mag;
         axis = cross.map(v => v / mag) as [number, number, number];
-        found = true;
-        break;
       }
     }
-    if (!found) {
+    
+    if (maxMag < 0.01) {
       axis = [0, 0, 1];
     }
     
@@ -835,7 +855,7 @@ export default function App() {
 
   useEffect(() => {
     if (crystalAtoms.length > 0) computeXRD();
-  }, [crystalAtoms, cell]);
+  }, [crystalAtoms, cell, xrdParams, sg]);
 
   const handleCIFImport = useCallback(() => {
     const input = document.createElement('input');
