@@ -150,3 +150,23 @@ export const DEFAULT_CELL: CellParams = {
   a: 5.0, b: 5.0, c: 5.0,
   alpha: 90, beta: 90, gamma: 90,
 };
+
+export interface IndexingPeakResult {
+  index: number;
+  expTwoTheta: number;
+  calcTwoTheta: number;
+  deltaTwoTheta: number;
+  h: number;
+  k: number;
+  l: number;
+  dSpacing: number;
+}
+
+export interface IndexingResult {
+  crystalSystem: string;
+  cell: CellParams;
+  peaks: IndexingPeakResult[];
+  rms: number;
+  matchedPeaks: number;
+  totalPeaks: number;
+}

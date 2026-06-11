@@ -12,9 +12,10 @@ import { PRESETS } from './data/presets';
 import { generateEquivalentPositions, fractionalToCartesian, computeDistance, initWasm, kabschAlignment } from './crystal/symmetry';
 import { calculateXRDPattern, calculateStructureFactorDetail, computeReciprocalCell } from './crystal/xrd';
 import { parseCIF, exportCIF } from './crystal/cif';
+import { indexPeaks, parseTwoThetaInput, getHighestSymmetrySpaceGroup } from './crystal/indexing';
 import type {
   CellParams, AsymAtom, CrystalAtom, XRDPattern, StructureFactorDetail,
-  XRDParams, SupercellParams,
+  XRDParams, SupercellParams, IndexingResult,
 } from './types';
 import { CPK_COLORS, COVALENT_RADII, WAVELENGTHS, DEFAULT_XRD_PARAMS, DEFAULT_CELL } from './types';
 
@@ -787,7 +788,7 @@ export default function App() {
   const [showPolyhedra, setShowPolyhedra] = useState(false);
   const [selectedAtom, setSelectedAtom] = useState<number | null>(null);
   const [sfDetail, setSfDetail] = useState<StructureFactorDetail | null>(null);
-  const [activeTab, setActiveTab] = useState<'structure' | 'xrd' | 'compare' | 'teaching'>('structure');
+  const [activeTab, setActiveTab] = useState<'structure' | 'xrd' | 'compare' | 'teaching' | 'indexing'>('structure');
   const [showSymmetryViz, setShowSymmetryViz] = useState(false);
   const [compareAtoms, setCompareAtoms] = useState<CrystalAtom[]>([]);
   const [compareCell, setCompareCell] = useState<CellParams | null>(null);
@@ -798,6 +799,12 @@ export default function App() {
   const [selectedSymOp, setSelectedSymOp] = useState<number | null>(null);
   const [animProgress, setAnimProgress] = useState(0);
   const [isAnimating, setIsAnimating] = useState(false);
+  const [indexingInput, setIndexingInput] = useState<string>('');
+  const [indexingWavelength, setIndexingWavelength] = useState<number>(1.5406);
+  const [indexingTolerance, setIndexingTolerance] = useState<number>(0.05);
+  const [indexingResult, setIndexingResult] = useState<IndexingResult | null>(null);
+  const [indexingBestCandidate, setIndexingBestCandidate] = useState<IndexingResult | null>(null);
+  const [indexingComputing, setIndexingComputing] = useState<boolean>(false);
 
   useEffect(() => {
     initWasm().then(ok => setWasmReady(ok));
@@ -1085,7 +1092,7 @@ export default function App() {
 
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
           <div style={{ display: 'flex', gap: 0, background: '#010409', borderBottom: '1px solid #30363d' }}>
-            {(['structure', 'xrd', 'compare', 'teaching'] as const).map(tab => (
+            {(['structure', 'xrd', 'indexing', 'compare', 'teaching'] as const).map(tab => (
               <button key={tab} onClick={() => setActiveTab(tab)} style={{
                 padding: '6px 16px', border: 'none', cursor: 'pointer',
                 background: activeTab === tab ? '#161b22' : 'transparent',
@@ -1093,7 +1100,7 @@ export default function App() {
                 borderBottom: activeTab === tab ? '2px solid #58a6ff' : '2px solid transparent',
                 fontWeight: 600, fontSize: 13,
               }}>
-                {tab === 'structure' ? '3D Structure' : tab === 'xrd' ? 'XRD Pattern' : tab === 'compare' ? 'Compare' : 'Teaching'}
+                {tab === 'structure' ? '3D Structure' : tab === 'xrd' ? 'XRD Pattern' : tab === 'indexing' ? 'Indexing' : tab === 'compare' ? 'Compare' : 'Teaching'}
               </button>
             ))}
           </div>
@@ -1235,6 +1242,306 @@ export default function App() {
                   </div>
                 </>
               )}
+            </div>
+          )}
+
+          {activeTab === 'indexing' && (
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+              <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+                <div style={{ width: 300, padding: 8, borderRight: '1px solid #30363d', overflowY: 'auto' }}>
+                  <div style={panelStyle}>
+                    <div style={{ fontWeight: 700, marginBottom: 6, color: '#58a6ff' }}>Peak Input</div>
+                    <div style={{ fontSize: 11, color: '#8b949e', marginBottom: 4 }}>
+                      Enter 2θ values (one per line, in degrees):
+                    </div>
+                    <textarea
+                      style={{
+                        ...inputStyle,
+                        height: 200,
+                        fontFamily: 'monospace',
+                        fontSize: 11,
+                        resize: 'vertical',
+                      }}
+                      value={indexingInput}
+                      onChange={e => setIndexingInput(e.target.value)}
+                      placeholder={'27.35\n31.75\n45.45\n53.85\n56.60\n66.25'}
+                    />
+                    <div style={{ fontSize: 10, color: '#8b949e', marginTop: 4 }}>
+                      {parseTwoThetaInput(indexingInput).length} valid peaks found
+                    </div>
+                  </div>
+
+                  <div style={panelStyle}>
+                    <div style={{ fontWeight: 700, marginBottom: 6, color: '#58a6ff' }}>Parameters</div>
+                    <div style={{ marginBottom: 8 }}>
+                      <div style={labelStyle}>X-ray Wavelength</div>
+                      <select
+                        style={{ ...inputStyle, width: '100%' }}
+                        value={indexingWavelength}
+                        onChange={e => setIndexingWavelength(+e.target.value)}
+                      >
+                        {Object.entries(WAVELENGTHS).map(([k, v]) => (
+                          <option key={k} value={v}>{k} ({v} Å)</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div style={{ marginBottom: 8 }}>
+                      <div style={labelStyle}>
+                        2θ Tolerance: {indexingTolerance.toFixed(2)}°
+                      </div>
+                      <input
+                        type="range"
+                        min={0.01}
+                        max={0.5}
+                        step={0.01}
+                        value={indexingTolerance}
+                        onChange={e => setIndexingTolerance(+e.target.value)}
+                        style={{ width: '100%' }}
+                      />
+                    </div>
+                    <button
+                      style={{ ...btnStyle, width: '100%' }}
+                      onClick={() => {
+                        const peaks = parseTwoThetaInput(indexingInput);
+                        if (peaks.length < 3) {
+                          alert('At least 3 peaks are required for indexing.');
+                          return;
+                        }
+                        setIndexingComputing(true);
+                        setIndexingResult(null);
+                        setIndexingBestCandidate(null);
+                        setTimeout(() => {
+                          const { result, bestCandidate } = indexPeaks(
+                            peaks,
+                            indexingWavelength,
+                            indexingTolerance
+                          );
+                          setIndexingResult(result);
+                          setIndexingBestCandidate(bestCandidate);
+                          setIndexingComputing(false);
+                        }, 50);
+                      }}
+                      disabled={indexingComputing || parseTwoThetaInput(indexingInput).length < 3}
+                    >
+                      {indexingComputing ? 'Indexing...' : 'Index Peaks'}
+                    </button>
+                  </div>
+
+                  {indexingResult && (
+                    <div style={panelStyle}>
+                      <div style={{ fontWeight: 700, marginBottom: 6, color: '#3fb950' }}>
+                        ✓ Solution Found
+                      </div>
+                      <div style={{ fontSize: 12, marginBottom: 8 }}>
+                        <div>Crystal System: <b>{indexingResult.crystalSystem}</b></div>
+                        <div>Matched: {indexingResult.matchedPeaks}/{indexingResult.totalPeaks} peaks</div>
+                        <div>RMS Δ2θ: {indexingResult.rms.toFixed(4)}°</div>
+                      </div>
+                      <button
+                        style={{ ...btnStyle, width: '100%', background: '#1f6feb' }}
+                        onClick={() => {
+                          setCell({ ...indexingResult.cell });
+                          const sgNum = getHighestSymmetrySpaceGroup(indexingResult.crystalSystem);
+                          setSpaceGroupNum(sgNum);
+                        }}
+                      >
+                        Apply to Structure
+                      </button>
+                    </div>
+                  )}
+
+                  {!indexingResult && indexingBestCandidate && (
+                    <div style={panelStyle}>
+                      <div style={{ fontWeight: 700, marginBottom: 6, color: '#f0883e' }}>
+                        ⚠ No Perfect Match
+                      </div>
+                      <div style={{ fontSize: 12, marginBottom: 8 }}>
+                        <div>Best candidate: <b>{indexingBestCandidate.crystalSystem}</b></div>
+                        <div>Matched: {indexingBestCandidate.matchedPeaks}/{indexingBestCandidate.totalPeaks} peaks</div>
+                        <div>RMS Δ2θ: {indexingBestCandidate.rms.toFixed(4)}°</div>
+                      </div>
+                      <button
+                        style={{ ...btnStyle, width: '100%', background: '#f0883e' }}
+                        onClick={() => {
+                          setCell({ ...indexingBestCandidate.cell });
+                          const sgNum = getHighestSymmetrySpaceGroup(indexingBestCandidate.crystalSystem);
+                          setSpaceGroupNum(sgNum);
+                        }}
+                      >
+                        Apply Best Candidate
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                  <div style={{ padding: 8, borderBottom: '1px solid #30363d' }}>
+                    <h3 style={{ margin: 0, color: '#58a6ff', fontSize: 14 }}>
+                      Indexing Results
+                    </h3>
+                  </div>
+
+                  {(indexingResult || indexingBestCandidate) && (
+                    <>
+                      <div style={{ padding: 8, borderBottom: '1px solid #30363d' }}>
+                        <div style={{ fontWeight: 700, marginBottom: 6, color: '#c9d1d9' }}>
+                          Unit Cell Parameters
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, fontSize: 12 }}>
+                          <div style={panelStyle}>
+                            <div style={{ color: '#8b949e', fontSize: 10 }}>a (Å)</div>
+                            <div style={{ fontWeight: 600 }}>
+                              {(indexingResult || indexingBestCandidate)!.cell.a.toFixed(4)}
+                            </div>
+                          </div>
+                          <div style={panelStyle}>
+                            <div style={{ color: '#8b949e', fontSize: 10 }}>b (Å)</div>
+                            <div style={{ fontWeight: 600 }}>
+                              {(indexingResult || indexingBestCandidate)!.cell.b.toFixed(4)}
+                            </div>
+                          </div>
+                          <div style={panelStyle}>
+                            <div style={{ color: '#8b949e', fontSize: 10 }}>c (Å)</div>
+                            <div style={{ fontWeight: 600 }}>
+                              {(indexingResult || indexingBestCandidate)!.cell.c.toFixed(4)}
+                            </div>
+                          </div>
+                          <div style={panelStyle}>
+                            <div style={{ color: '#8b949e', fontSize: 10 }}>α (°)</div>
+                            <div style={{ fontWeight: 600 }}>
+                              {(indexingResult || indexingBestCandidate)!.cell.alpha.toFixed(2)}
+                            </div>
+                          </div>
+                          <div style={panelStyle}>
+                            <div style={{ color: '#8b949e', fontSize: 10 }}>β (°)</div>
+                            <div style={{ fontWeight: 600 }}>
+                              {(indexingResult || indexingBestCandidate)!.cell.beta.toFixed(2)}
+                            </div>
+                          </div>
+                          <div style={panelStyle}>
+                            <div style={{ color: '#8b949e', fontSize: 10 }}>γ (°)</div>
+                            <div style={{ fontWeight: 600 }}>
+                              {(indexingResult || indexingBestCandidate)!.cell.gamma.toFixed(2)}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div style={{ flex: 1, overflowY: 'auto', padding: 8 }}>
+                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+                          <thead>
+                            <tr style={{ borderBottom: '1px solid #30363d', position: 'sticky', top: 0, background: '#161b22' }}>
+                              {['#', 'Exp. 2θ (°)', 'Calc. 2θ (°)', 'Δ2θ (°)', 'hkl', 'd (Å)'].map(h => (
+                                <th key={h} style={{ padding: '4px 8px', textAlign: 'left', color: '#8b949e', fontWeight: 600 }}>{h}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {(indexingResult || indexingBestCandidate)!.peaks.map((peak, i) => (
+                              <tr key={i} style={{ borderBottom: '1px solid #21262d' }}>
+                                <td style={{ padding: '3px 8px' }}>{i + 1}</td>
+                                <td style={{ padding: '3px 8px' }}>{peak.expTwoTheta.toFixed(3)}</td>
+                                <td style={{ padding: '3px 8px' }}>{peak.calcTwoTheta.toFixed(3)}</td>
+                                <td style={{
+                                  padding: '3px 8px',
+                                  color: Math.abs(peak.deltaTwoTheta) > indexingTolerance ? '#f85149' : '#3fb950',
+                                }}>
+                                  {peak.deltaTwoTheta >= 0 ? '+' : ''}{peak.deltaTwoTheta.toFixed(3)}
+                                </td>
+                                <td style={{ padding: '3px 8px', fontFamily: 'monospace' }}>
+                                  ({peak.h} {peak.k} {peak.l})
+                                </td>
+                                <td style={{ padding: '3px 8px' }}>{peak.dSpacing.toFixed(4)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      <div style={{ height: 220, padding: 8, borderTop: '1px solid #30363d' }}>
+                        <div style={{ fontSize: 11, color: '#8b949e', marginBottom: 4 }}>
+                          Comparison with XRD Pattern
+                        </div>
+                        {xrdPattern ? (
+                          <ResponsiveContainer width="100%" height="100%">
+                            <AreaChart data={xrdPattern.profile.map(([x, y]) => ({ x: x.toFixed(2), y }))}>
+                              <CartesianGrid strokeDasharray="3 3" stroke="#30363d" />
+                              <XAxis
+                                dataKey="x"
+                                stroke="#8b949e"
+                                tick={{ fontSize: 10 }}
+                                label={{ value: '2θ (°)', position: 'insideBottom', offset: -2, style: { fill: '#8b949e', fontSize: 10 } }}
+                              />
+                              <YAxis
+                                stroke="#8b949e"
+                                tick={{ fontSize: 10 }}
+                                label={{ value: 'I (rel.)', angle: -90, position: 'insideLeft', style: { fill: '#8b949e', fontSize: 10 } }}
+                              />
+                              <RTooltip contentStyle={{ background: '#161b22', border: '1px solid #30363d', fontSize: 11 }} />
+                              <Area type="monotone" dataKey="y" stroke="#58a6ff" fill="#1f6feb33" />
+                              {(indexingResult || indexingBestCandidate)!.peaks.map((peak, i) => (
+                                <ReferenceLine
+                                  key={i}
+                                  x={peak.calcTwoTheta.toFixed(2)}
+                                  stroke="#3fb950"
+                                  strokeDasharray="3 3"
+                                  strokeWidth={2}
+                                />
+                              ))}
+                            </AreaChart>
+                          </ResponsiveContainer>
+                        ) : (
+                          <div style={{
+                            height: '100%',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            color: '#8b949e',
+                            fontSize: 12,
+                          }}>
+                            Calculate XRD pattern first to see comparison
+                          </div>
+                        )}
+                      </div>
+                    </>
+                  )}
+
+                  {!indexingResult && !indexingBestCandidate && !indexingComputing && (
+                    <div style={{
+                      flex: 1,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      color: '#8b949e',
+                      fontSize: 13,
+                    }}>
+                      <div style={{ textAlign: 'center' }}>
+                        <div style={{ fontSize: 24, marginBottom: 8 }}>🔍</div>
+                        <div>Enter 2θ peak positions and click "Index Peaks"</div>
+                        <div style={{ fontSize: 11, marginTop: 4, color: '#6e7681' }}>
+                          At least 3 peaks are required for indexing
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {indexingComputing && (
+                    <div style={{
+                      flex: 1,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      color: '#8b949e',
+                      fontSize: 13,
+                    }}>
+                      <div style={{ textAlign: 'center' }}>
+                        <div style={{ fontSize: 24, marginBottom: 8 }}>⚙️</div>
+                        <div>Indexing peaks, please wait...</div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
           )}
 
