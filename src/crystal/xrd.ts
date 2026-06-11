@@ -164,6 +164,7 @@ export function calculateXRDPattern(
   v: number,
   w: number,
   eta: number,
+  symOps?: SymOp[],
 ): XRDPattern {
   const wasm = getWasm();
   if (wasm) {
@@ -180,6 +181,7 @@ export function calculateXRDPattern(
 
   const maxHKL = 30;
   const peakMap = new Map<string, XRDPeak>();
+  const multiplicityCache = new Map<string, number>();
 
   for (let h = -maxHKL; h <= maxHKL; h++) {
     for (let k = -maxHKL; k <= maxHKL; k++) {
@@ -196,7 +198,19 @@ export function calculateXRDPattern(
         const [fReal, fImag] = computeStructureFactor(atoms, h, k, l, s);
         const fSq = fReal * fReal + fImag * fImag;
         const lp = lorentzPolarization(twoTheta * Math.PI / 180);
-        const intensity = fSq * lp;
+        
+        let mult = 1;
+        if (symOps && symOps.length > 0) {
+          const hklKey = `${Math.abs(h)},${Math.abs(k)},${Math.abs(l)}`;
+          if (!multiplicityCache.has(hklKey)) {
+            multiplicityCache.set(hklKey, computeMultiplicityFromOps(h, k, l, symOps));
+          }
+          mult = multiplicityCache.get(hklKey)!;
+        } else {
+          mult = computeMultiplicity(h, k, l);
+        }
+        
+        const intensity = fSq * mult * lp;
 
         if (intensity < 1e-10) continue;
 
@@ -204,11 +218,10 @@ export function calculateXRDPattern(
         const existing = peakMap.get(dKey);
         if (existing) {
           existing.intensity += intensity;
-          existing.multiplicity += 1;
         } else {
           peakMap.set(dKey, {
             h, k, l, d_spacing: d, two_theta: twoTheta,
-            multiplicity: 1, intensity, f_real: fReal, f_imag: fImag,
+            multiplicity: mult, intensity, f_real: fReal, f_imag: fImag,
           });
         }
       }
@@ -244,6 +257,7 @@ export function calculateStructureFactorDetail(
   cell: CellParams,
   h: number, k: number, l: number,
   wavelength: number,
+  symOps?: SymOp[],
 ): StructureFactorDetail {
   const wasm = getWasm();
   if (wasm) {
@@ -277,7 +291,9 @@ export function calculateStructureFactorDetail(
     });
   }
 
-  const mult = computeMultiplicity(h, k, l);
+  const mult = symOps && symOps.length > 0 
+    ? computeMultiplicityFromOps(h, k, l, symOps) 
+    : computeMultiplicity(h, k, l);
   const fSq = fRealTotal * fRealTotal + fImagTotal * fImagTotal;
   const lp = lorentzPolarization(twoTheta * Math.PI / 180);
   const intensity = fSq * mult * lp;

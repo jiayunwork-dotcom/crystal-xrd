@@ -222,20 +222,36 @@ function analyzeSymmetryElement(op: any): { type: string; axis?: [number, number
   
   if (Math.abs(trace - 1) < 0.01 && Math.abs(det + 1) < 0.01) {
     let normal: [number, number, number] = [0, 0, 0];
+    
+    const RminusI = [
+      [R[0][0] - 1, R[0][1], R[0][2]],
+      [R[1][0], R[1][1] - 1, R[1][2]],
+      [R[2][0], R[2][1], R[2][2] - 1],
+    ];
+    
     for (let i = 0; i < 3; i++) {
-      const cross = [
-        R[1][i] - (i === 1 ? 1 : 0),
-        R[2][i] - (i === 2 ? 1 : 0),
-        R[0][i] - (i === 0 ? 1 : 0),
+      const cross: [number, number, number] = [
+        RminusI[(i+1)%3][(i+2)%3] - RminusI[(i+2)%3][(i+1)%3],
+        RminusI[(i+2)%3][i] - RminusI[i][(i+2)%3],
+        RminusI[i][(i+1)%3] - RminusI[(i+1)%3][i],
       ];
-      if (Math.abs(cross[0]) + Math.abs(cross[1]) + Math.abs(cross[2]) > 0.01) {
-        normal = [cross[1] * -1 + cross[2], cross[2] * -1 + cross[0], cross[0] * -1 + cross[1]];
+      const mag = Math.sqrt(cross[0]*cross[0] + cross[1]*cross[1] + cross[2]*cross[2]);
+      if (mag > 0.01) {
+        normal = cross.map(v => v / mag) as [number, number, number];
         break;
       }
     }
-    const nMag = Math.sqrt(normal[0]*normal[0] + normal[1]*normal[1] + normal[2]*normal[2]);
-    if (nMag > 0.01) {
-      normal = normal.map(v => v / nMag) as [number, number, number];
+    
+    if (Math.sqrt(normal[0]*normal[0] + normal[1]*normal[1] + normal[2]*normal[2]) < 0.01) {
+      if (Math.abs(R[0][1]) < 0.01 && Math.abs(R[0][2]) < 0.01 && Math.abs(R[0][0] + 1) < 0.01) {
+        normal = [1, 0, 0];
+      } else if (Math.abs(R[1][0]) < 0.01 && Math.abs(R[1][2]) < 0.01 && Math.abs(R[1][1] + 1) < 0.01) {
+        normal = [0, 1, 0];
+      } else if (Math.abs(R[2][0]) < 0.01 && Math.abs(R[2][1]) < 0.01 && Math.abs(R[2][2] + 1) < 0.01) {
+        normal = [0, 0, 1];
+      } else {
+        normal = [0, 1, 0];
+      }
     }
     
     const tDotN = t[0]*normal[0] + t[1]*normal[1] + t[2]*normal[2];
@@ -243,17 +259,14 @@ function analyzeSymmetryElement(op: any): { type: string; axis?: [number, number
     const tPerp: [number, number, number] = [t[0]-tParallel[0], t[1]-tParallel[1], t[2]-tParallel[2]];
     const tPerpMag = Math.sqrt(tPerp[0]*tPerp[0] + tPerp[1]*tPerp[1] + tPerp[2]*tPerp[2]);
     
+    let point: [number, number, number];
     if (tPerpMag < 0.01) {
       const d = tDotN / 2;
-      const point = normal.map(v => v * d) as [number, number, number];
-      const glideMag = Math.abs(tDotN);
-      if (glideMag > 0.01) {
-        return { type: 'glide', normal, point, glide: tParallel };
-      }
-      return { type: 'mirror', normal, point };
+      point = normal.map(v => v * d) as [number, number, number];
+    } else {
+      point = [tPerp[0]/2, tPerp[1]/2, tPerp[2]/2] as [number, number, number];
     }
     
-    const point = [tPerp[0]/2, tPerp[1]/2, tPerp[2]/2] as [number, number, number];
     const glideMag = Math.abs(tDotN);
     if (glideMag > 0.01) {
       return { type: 'glide', normal, point, glide: tParallel };
@@ -813,11 +826,12 @@ export default function App() {
         xrdParams.wavelength, xrdParams.dMin,
         xrdParams.twoThetaMin, xrdParams.twoThetaMax,
         xrdParams.u, xrdParams.v, xrdParams.w, xrdParams.eta,
+        sg?.operations,
       );
       setXrdPattern(result);
       setComputing(false);
     }, 50);
-  }, [crystalAtoms, cell, xrdParams]);
+  }, [crystalAtoms, cell, xrdParams, sg]);
 
   useEffect(() => {
     if (crystalAtoms.length > 0) computeXRD();
@@ -1183,7 +1197,7 @@ export default function App() {
                         {xrdPattern.peaks.sort((a, b) => b.intensity - a.intensity).slice(0, 50).map((peak, i) => (
                           <tr key={i} style={{ cursor: 'pointer', borderBottom: '1px solid #21262d' }}
                             onClick={() => {
-                              const detail = calculateStructureFactorDetail(crystalAtoms, cell, peak.h, peak.k, peak.l, xrdParams.wavelength);
+                              const detail = calculateStructureFactorDetail(crystalAtoms, cell, peak.h, peak.k, peak.l, xrdParams.wavelength, sg?.operations);
                               setSfDetail(detail);
                             }}
                             onMouseOver={e => (e.currentTarget.style.background = '#1f6feb33')}
