@@ -1,5 +1,6 @@
 import type { CrystalAtom, CellParams, XRDPattern, XRDPeak, StructureFactorDetail, ReciprocalCell } from '../types';
-import { getWasm } from './symmetry';
+import { getWasm, fractionalToCartesian } from './symmetry';
+import type { SymOp } from '../data/spaceGroups';
 
 const SCATTERING_PARAMS: Record<string, { a: number[]; b: number[]; c: number }> = {
   H: { a: [0.4930, 0.3229, 0.1402, 0.0408], b: [10.5109, 26.1257, 3.1424, 57.7998], c: 0.003038 },
@@ -90,7 +91,57 @@ function lorentzPolarization(twoThetaRad: number): number {
   const sinT = Math.sin(twoThetaRad / 2);
   const cosT = Math.cos(twoThetaRad / 2);
   const cos2T = Math.cos(twoThetaRad);
-  return (1 + cos2T * cos2T) / (sinT * sinT * sinT * 2 * cosT * 4);
+  return (1 + cos2T * cos2T) / (sinT * sinT * cosT);
+}
+
+function extractPointGroup(operations: SymOp[]): number[][][] {
+  const unique: number[][][] = [];
+  const seen = new Set<string>();
+  for (const op of operations) {
+    const key = op.rotation.flat().map(v => Math.round(v)).join(',');
+    if (!seen.has(key)) {
+      seen.add(key);
+      unique.push(op.rotation.map(row => [...row]));
+    }
+  }
+  return unique;
+}
+
+export function computeMultiplicityFromOps(h: number, k: number, l: number, operations: SymOp[]): number {
+  const pointGroup = extractPointGroup(operations);
+  const seen = new Set<string>();
+  
+  for (const R of pointGroup) {
+    const hp = R[0][0] * h + R[0][1] * k + R[0][2] * l;
+    const kp = R[1][0] * h + R[1][1] * k + R[1][2] * l;
+    const lp = R[2][0] * h + R[2][1] * k + R[2][2] * l;
+    const key = `${hp},${kp},${lp}`;
+    const keyNeg = `${-hp},${-kp},${-lp}`;
+    if (!seen.has(key) && !seen.has(keyNeg)) {
+      seen.add(key);
+    }
+  }
+  
+  return seen.size;
+}
+
+function computeMultiplicity(h: number, k: number, l: number): number {
+  if (h === 0 && k === 0 && l === 0) return 0;
+  
+  const ah = Math.abs(h), ak = Math.abs(k), al = Math.abs(l);
+  const zeros = (ah === 0 ? 1 : 0) + (ak === 0 ? 1 : 0) + (al === 0 ? 1 : 0);
+  const allEqual = ah === ak && ak === al;
+  const twoEqual = (ah === ak && ah !== 0) || (ah === al && ah !== 0) || (ak === al && ak !== 0);
+  
+  if (zeros === 3) return 1;
+  if (zeros === 2) return 6;
+  if (zeros === 1) {
+    if (twoEqual) return 12;
+    return 24;
+  }
+  if (allEqual) return 8;
+  if (twoEqual) return 24;
+  return 48;
 }
 
 function pseudoVoigt(x: number, center: number, fwhm: number, eta: number): number {
@@ -100,21 +151,6 @@ function pseudoVoigt(x: number, center: number, fwhm: number, eta: number): numb
   const gauss = Math.exp(-(x - center) * (x - center) / (2 * sigma * sigma)) / (sigma * Math.sqrt(2 * Math.PI));
   const lorentz = gammaL / (Math.PI * ((x - center) * (x - center) + gammaL * gammaL));
   return eta * lorentz + (1 - eta) * gauss;
-}
-
-function computeMultiplicity(h: number, k: number, l: number): number {
-  const perms = [
-    [h, k, l], [h, l, k], [k, h, l], [k, l, h], [l, h, k], [l, k, h],
-    [-h, k, l], [h, -k, l], [h, k, -l], [-h, -k, l], [-h, k, -l], [h, -k, -l],
-    [-h, -k, -l], [k, -h, l], [-k, h, l], [l, k, -h], [-l, -k, h], [-h, l, k],
-    [h, -l, k], [-h, -l, -k], [-k, -l, -h], [-l, -h, -k], [l, -h, -k], [k, l, -h],
-  ];
-  const equivs: string[] = [];
-  for (const [ph, pk, pl] of perms) {
-    const key = `${ph},${pk},${pl}`;
-    if (!equivs.includes(key)) equivs.push(key);
-  }
-  return equivs.length;
 }
 
 export function calculateXRDPattern(
@@ -142,9 +178,8 @@ export function calculateXRDPattern(
     }
   }
 
-  const maxHKL = 25;
-  const peaks: XRDPeak[] = [];
-  const seenD = new Set<string>();
+  const maxHKL = 30;
+  const peakMap = new Map<string, XRDPeak>();
 
   for (let h = -maxHKL; h <= maxHKL; h++) {
     for (let k = -maxHKL; k <= maxHKL; k++) {
@@ -157,23 +192,30 @@ export function calculateXRDPattern(
         const twoTheta = 2 * Math.asin(sinTheta) * 180 / Math.PI;
         if (twoTheta < twoThetaMin || twoTheta > twoThetaMax) continue;
 
-        const dKey = d.toFixed(4);
-        if (seenD.has(dKey)) continue;
-        seenD.add(dKey);
-
         const s = sinTheta / wavelength;
         const [fReal, fImag] = computeStructureFactor(atoms, h, k, l, s);
         const fSq = fReal * fReal + fImag * fImag;
         const lp = lorentzPolarization(twoTheta * Math.PI / 180);
-        const mult = computeMultiplicity(h, k, l);
-        const intensity = fSq * mult * lp;
-        if (intensity > 1e-6) {
-          peaks.push({ h, k, l, d_spacing: d, two_theta: twoTheta, multiplicity: mult, intensity, f_real: fReal, f_imag: fImag });
+        const intensity = fSq * lp;
+
+        if (intensity < 1e-10) continue;
+
+        const dKey = d.toFixed(4);
+        const existing = peakMap.get(dKey);
+        if (existing) {
+          existing.intensity += intensity;
+          existing.multiplicity += 1;
+        } else {
+          peakMap.set(dKey, {
+            h, k, l, d_spacing: d, two_theta: twoTheta,
+            multiplicity: 1, intensity, f_real: fReal, f_imag: fImag,
+          });
         }
       }
     }
   }
 
+  let peaks = Array.from(peakMap.values());
   if (peaks.length === 0) return { peaks: [], profile: [] };
 
   const maxIntensity = Math.max(...peaks.map(p => p.intensity));

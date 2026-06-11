@@ -9,7 +9,7 @@ import {
 } from 'recharts';
 import { SPACE_GROUPS, CRYSTAL_SYSTEMS, getSpaceGroupByNumber } from './data/spaceGroups';
 import { PRESETS } from './data/presets';
-import { generateEquivalentPositions, fractionalToCartesian, computeDistance, initWasm } from './crystal/symmetry';
+import { generateEquivalentPositions, fractionalToCartesian, computeDistance, initWasm, kabschAlignment } from './crystal/symmetry';
 import { calculateXRDPattern, calculateStructureFactorDetail, computeReciprocalCell } from './crystal/xrd';
 import { parseCIF, exportCIF } from './crystal/cif';
 import type {
@@ -20,7 +20,7 @@ import { CPK_COLORS, COVALENT_RADII, WAVELENGTHS, DEFAULT_XRD_PARAMS, DEFAULT_CE
 
 function AtomSphere({ position, color, radius, onClick, selected }: {
   position: [number, number, number]; color: string; radius: number;
-  onClick?: () => void; selected?: boolean;
+  onClick?: (e: any) => void; selected?: boolean;
 }) {
   return (
     <mesh position={position} onClick={onClick}>
@@ -55,13 +55,13 @@ function UnitCellFrame({ cell, scale = 1 }: { cell: CellParams; scale?: number }
     return corners;
   }, [cell, scale]);
 
-  const edges: [number, number][][] = useMemo(() => {
-    const idx = [
+  const edges: [number, number][] = useMemo(() => {
+    const idx: [number, number][] = [
       [0,1],[2,3],[4,5],[6,7],
       [0,2],[1,3],[4,6],[5,7],
       [0,4],[1,5],[2,6],[3,7],
     ];
-    return idx.map(([a, b]) => [a, b]);
+    return idx;
   }, []);
 
   return (
@@ -202,23 +202,471 @@ function CrystalScene({
   );
 }
 
-function SymmetryViz3D({ operations, cell }: { operations: any[]; cell: CellParams }) {
+function analyzeSymmetryElement(op: any): { type: string; axis?: [number, number, number]; angle?: number; point?: [number, number, number]; normal?: [number, number, number]; glide?: [number, number, number]; screw?: number } {
+  const R = op.rotation;
+  const t = op.translation;
+  
+  const trace = R[0][0] + R[1][1] + R[2][2];
+  const det = R[0][0]*(R[1][1]*R[2][2]-R[1][2]*R[2][1]) - R[0][1]*(R[1][0]*R[2][2]-R[1][2]*R[2][0]) + R[0][2]*(R[1][0]*R[2][1]-R[1][1]*R[2][0]);
+  
+  if (Math.abs(trace - 3) < 0.01 && Math.abs(det - 1) < 0.01) {
+    const tMag = Math.sqrt(t[0]*t[0] + t[1]*t[1] + t[2]*t[2]);
+    if (tMag < 0.01) return { type: 'identity' };
+    return { type: 'translation' };
+  }
+  
+  if (Math.abs(trace + 3) < 0.01 && Math.abs(det + 1) < 0.01) {
+    const invPoint: [number, number, number] = [t[0]/2, t[1]/2, t[2]/2];
+    return { type: 'inversion', point: invPoint };
+  }
+  
+  if (Math.abs(trace - 1) < 0.01 && Math.abs(det + 1) < 0.01) {
+    let normal: [number, number, number] = [0, 0, 0];
+    for (let i = 0; i < 3; i++) {
+      const cross = [
+        R[1][i] - (i === 1 ? 1 : 0),
+        R[2][i] - (i === 2 ? 1 : 0),
+        R[0][i] - (i === 0 ? 1 : 0),
+      ];
+      if (Math.abs(cross[0]) + Math.abs(cross[1]) + Math.abs(cross[2]) > 0.01) {
+        normal = [cross[1] * -1 + cross[2], cross[2] * -1 + cross[0], cross[0] * -1 + cross[1]];
+        break;
+      }
+    }
+    const nMag = Math.sqrt(normal[0]*normal[0] + normal[1]*normal[1] + normal[2]*normal[2]);
+    if (nMag > 0.01) {
+      normal = normal.map(v => v / nMag) as [number, number, number];
+    }
+    
+    const tDotN = t[0]*normal[0] + t[1]*normal[1] + t[2]*normal[2];
+    const tParallel = normal.map(v => v * tDotN) as [number, number, number];
+    const tPerp: [number, number, number] = [t[0]-tParallel[0], t[1]-tParallel[1], t[2]-tParallel[2]];
+    const tPerpMag = Math.sqrt(tPerp[0]*tPerp[0] + tPerp[1]*tPerp[1] + tPerp[2]*tPerp[2]);
+    
+    if (tPerpMag < 0.01) {
+      const d = tDotN / 2;
+      const point = normal.map(v => v * d) as [number, number, number];
+      const glideMag = Math.abs(tDotN);
+      if (glideMag > 0.01) {
+        return { type: 'glide', normal, point, glide: tParallel };
+      }
+      return { type: 'mirror', normal, point };
+    }
+    
+    const point = [tPerp[0]/2, tPerp[1]/2, tPerp[2]/2] as [number, number, number];
+    const glideMag = Math.abs(tDotN);
+    if (glideMag > 0.01) {
+      return { type: 'glide', normal, point, glide: tParallel };
+    }
+    return { type: 'mirror', normal, point };
+  }
+  
+  if (Math.abs(det - 1) < 0.01) {
+    let axis: [number, number, number] = [0, 0, 1];
+    const cosAngle = (trace - 1) / 2;
+    const angle = Math.acos(Math.max(-1, Math.min(1, cosAngle)));
+    
+    let found = false;
+    for (let i = 0; i < 3; i++) {
+      const col = [R[0][i] - (i===0?1:0), R[1][i] - (i===1?1:0), R[2][i] - (i===2?1:0)];
+      const cross = [
+        col[1] * (R[2][(i+1)%3] - (i===2?1:0)) - col[2] * (R[1][(i+2)%3] - (i===1?1:0)),
+        col[2] * (R[0][(i+2)%3] - (i===0?1:0)) - col[0] * (R[2][(i+0)%3] - (i===2?1:0)),
+        col[0] * (R[1][(i+0)%3] - (i===1?1:0)) - col[1] * (R[0][(i+1)%3] - (i===0?1:0)),
+      ];
+      const mag = Math.sqrt(cross[0]*cross[0] + cross[1]*cross[1] + cross[2]*cross[2]);
+      if (mag > 0.01) {
+        axis = cross.map(v => v / mag) as [number, number, number];
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      axis = [0, 0, 1];
+    }
+    
+    let pointOnAxis: [number, number, number] = [0, 0, 0];
+    const IminusR = [
+      [1 - R[0][0], -R[0][1], -R[0][2]],
+      [-R[1][0], 1 - R[1][1], -R[1][2]],
+      [-R[2][0], -R[2][1], 1 - R[2][2]],
+    ];
+    
+    const tDotAxis = t[0]*axis[0] + t[1]*axis[1] + t[2]*axis[2];
+    const tParallel = axis.map(v => v * tDotAxis) as [number, number, number];
+    const tPerp: [number, number, number] = [t[0]-tParallel[0], t[1]-tParallel[1], t[2]-tParallel[2]];
+    
+    const tPerpMag = Math.sqrt(tPerp[0]*tPerp[0] + tPerp[1]*tPerp[1] + tPerp[2]*tPerp[2]);
+    if (tPerpMag > 0.01) {
+      const theta = angle / 2;
+      const perpDir = [tPerp[0]/tPerpMag, tPerp[1]/tPerpMag, tPerp[2]/tPerpMag];
+      const dist = (tPerpMag / 2) / Math.tan(theta);
+      
+      const cross: [number, number, number] = [
+        axis[1]*perpDir[2] - axis[2]*perpDir[1],
+        axis[2]*perpDir[0] - axis[0]*perpDir[2],
+        axis[0]*perpDir[1] - axis[1]*perpDir[0],
+      ];
+      pointOnAxis = [
+        tPerp[0]/2 + cross[0] * dist,
+        tPerp[1]/2 + cross[1] * dist,
+        tPerp[2]/2 + cross[2] * dist,
+      ];
+    }
+    
+    const screwAmount = tDotAxis;
+    const n = Math.round(2 * Math.PI / angle);
+    
+    if (Math.abs(screwAmount) > 0.01) {
+      return { type: 'screw', axis, angle: angle * 180 / Math.PI, point: pointOnAxis, screw: screwAmount };
+    }
+    
+    return { type: 'rotation', axis, angle: angle * 180 / Math.PI, point: pointOnAxis };
+  }
+  
+  if (Math.abs(det + 1) < 0.01) {
+    let axis: [number, number, number] = [0, 0, 1];
+    const cosAngle = (trace + 1) / 2;
+    const angle = Math.acos(Math.max(-1, Math.min(1, cosAngle)));
+    
+    const R2 = R.map((row: number[]) => row.map((v: number) => -v));
+    const trace2 = R2[0][0] + R2[1][1] + R2[2][2];
+    
+    if (Math.abs(trace2 - 1) < 0.01) {
+      for (let i = 0; i < 3; i++) {
+        const col = [R2[0][i] - (i===0?1:0), R2[1][i] - (i===1?1:0), R2[2][i] - (i===2?1:0)];
+        const mag = Math.sqrt(col[0]*col[0] + col[1]*col[1] + col[2]*col[2]);
+        if (mag > 0.01) {
+          const cross: [number, number, number] = [
+            col[1] * -col[2] + col[2] * -col[1],
+            col[2] * -col[0] + col[0] * -col[2],
+            col[0] * -col[1] + col[1] * -col[0],
+          ];
+          const cMag = Math.sqrt(cross[0]*cross[0] + cross[1]*cross[1] + cross[2]*cross[2]);
+          if (cMag > 0.01) {
+            axis = cross.map(v => v / cMag) as [number, number, number];
+            break;
+          }
+        }
+      }
+    }
+    
+    const invPoint: [number, number, number] = [t[0]/2, t[1]/2, t[2]/2];
+    return { type: 'rotoinversion', axis, angle: angle * 180 / Math.PI, point: invPoint };
+  }
+  
+  return { type: 'unknown' };
+}
+
+function RotationAxis({ point, axis, length = 3, color = '#ff4444' }: {
+  point: [number, number, number]; axis: [number, number, number]; length?: number; color?: string;
+}) {
+  const mid = point.map((v, i) => v + axis[i] * length / 2) as [number, number, number];
+  const dir = new THREE.Vector3(...axis);
+  const quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize());
+  
+  return (
+    <group position={mid} quaternion={quat as any}>
+      <mesh>
+        <cylinderGeometry args={[0.03, 0.03, length, 8]} />
+        <meshStandardMaterial color={color} />
+      </mesh>
+      <mesh position={[0, length/2, 0]}>
+        <coneGeometry args={[0.08, 0.2, 8]} />
+        <meshStandardMaterial color={color} />
+      </mesh>
+      <mesh position={[0, -length/2, 0]} rotation={[Math.PI, 0, 0]}>
+        <coneGeometry args={[0.08, 0.2, 8]} />
+        <meshStandardMaterial color={color} />
+      </mesh>
+    </group>
+  );
+}
+
+function ScrewAxis({ point, axis, length = 3, color = '#ff8844', screwAmount }: {
+  point: [number, number, number]; axis: [number, number, number]; length?: number; color?: string; screwAmount: number;
+}) {
+  const points: [number, number, number][] = [];
+  const turns = 2;
+  const segments = 60;
+  const radius = 0.15;
+  
+  for (let i = 0; i <= segments; i++) {
+    const t = i / segments;
+    const angle = t * turns * 2 * Math.PI;
+    const z = (t - 0.5) * length;
+    const x = Math.cos(angle) * radius;
+    const y = Math.sin(angle) * radius;
+    points.push([x, y, z]);
+  }
+  
+  const dir = new THREE.Vector3(...axis);
+  const quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), dir.normalize());
+  
+  const rotatedPoints = points.map(p => {
+    const v = new THREE.Vector3(...p).applyQuaternion(quat);
+    return [v.x + point[0], v.y + point[1], v.z + point[2]] as [number, number, number];
+  });
+  
   return (
     <group>
-      {operations.slice(0, 10).map((op: any, i: number) => {
-        const R = op.rotation;
-        const trace = R[0][0] + R[1][1] + R[2][2];
-        const isMirror = trace === 1 && R[0][0] * R[1][1] * R[2][2] !== 1;
-        if (isMirror) {
-          const size = 3;
+      <Line points={rotatedPoints} color={color} lineWidth={2} />
+      <RotationAxis point={point} axis={axis} length={length} color={color} />
+    </group>
+  );
+}
+
+function MirrorPlane({ point, normal, size = 3, color = '#4488ff' }: {
+  point: [number, number, number]; normal: [number, number, number]; size?: number; color?: string;
+}) {
+  const dir = new THREE.Vector3(...normal);
+  const quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), dir.normalize());
+  
+  return (
+    <mesh position={point} quaternion={quat as any}>
+      <planeGeometry args={[size, size]} />
+      <meshStandardMaterial color={color} transparent opacity={0.2} side={THREE.DoubleSide} />
+      <meshBasicMaterial color={color} wireframe transparent opacity={0.3} side={THREE.DoubleSide} />
+    </mesh>
+  );
+}
+
+function GlidePlane({ point, normal, glide, size = 3, color = '#44ff88' }: {
+  point: [number, number, number]; normal: [number, number, number]; glide: [number, number, number]; size?: number; color?: string;
+}) {
+  const dir = new THREE.Vector3(...normal);
+  const quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), dir.normalize());
+  
+  const dashLines: [number, number, number][][] = [];
+  const nLines = 8;
+  for (let i = 0; i < nLines; i++) {
+    const y = (i / nLines - 0.5) * size;
+    const start = [-size/2, y, 0];
+    const end = [size/2, y, 0];
+    dashLines.push([start as [number, number, number], end as [number, number, number]]);
+  }
+  
+  const glideDir = new THREE.Vector3(...glide);
+  const glideLen = glideDir.length();
+  if (glideLen > 0.001) {
+    glideDir.normalize();
+    const arrowStart = new THREE.Vector3(0, 0, 0.01);
+    const arrowEnd = arrowStart.clone().add(glideDir.multiplyScalar(0.5));
+  }
+  
+  return (
+    <group position={point} quaternion={quat as any}>
+      <mesh>
+        <planeGeometry args={[size, size]} />
+        <meshStandardMaterial color={color} transparent opacity={0.1} side={THREE.DoubleSide} />
+      </mesh>
+      {dashLines.map((line, i) => (
+        <Line key={i} points={line} color={color} lineWidth={1} transparent opacity={0.5} dashed dashSize={0.15} gapSize={0.1} />
+      ))}
+    </group>
+  );
+}
+
+function InversionCenter({ point, size = 0.15, color = '#ffff44' }: {
+  point: [number, number, number]; size?: number; color?: string;
+}) {
+  return (
+    <group position={point}>
+      <mesh>
+        <sphereGeometry args={[size, 12, 12]} />
+        <meshStandardMaterial color={color} transparent opacity={0.7} />
+      </mesh>
+      <mesh rotation={[Math.PI/2, 0, 0]}>
+        <torusGeometry args={[size * 1.5, 0.02, 8, 24]} />
+        <meshStandardMaterial color={color} />
+      </mesh>
+      <mesh rotation={[0, Math.PI/2, 0]}>
+        <torusGeometry args={[size * 1.5, 0.02, 8, 24]} />
+        <meshStandardMaterial color={color} />
+      </mesh>
+    </group>
+  );
+}
+
+function SymmetryViz3D({ operations, cell, onSelectOperation, selectedOpIndex }: {
+  operations: any[]; cell: CellParams; onSelectOperation?: (idx: number) => void; selectedOpIndex?: number | null;
+}) {
+  const elements = useMemo(() => {
+    const result: { op: any; element: any; idx: number }[] = [];
+    const seen = new Set<string>();
+    
+    for (let i = 0; i < operations.length; i++) {
+      const op = operations[i];
+      const element = analyzeSymmetryElement(op);
+      if (element.type === 'identity' || element.type === 'translation') continue;
+      
+      const key = element.type + ';' + 
+        (element.axis ? element.axis.map(v => v.toFixed(2)).join(',') : '') + ';' +
+        (element.point ? element.point.map(v => v.toFixed(2)).join(',') : '') + ';' +
+        (element.normal ? element.normal.map(v => v.toFixed(2)).join(',') : '');
+      
+      const negKey = element.type + ';' + 
+        (element.axis ? element.axis.map(v => (-v).toFixed(2)).join(',') : '') + ';' +
+        (element.point ? element.point.map(v => (-v).toFixed(2)).join(',') : '') + ';' +
+        (element.normal ? element.normal.map(v => (-v).toFixed(2)).join(',') : '');
+      
+      if (seen.has(key) || seen.has(negKey)) continue;
+      seen.add(key);
+      
+      result.push({ op, element, idx: i });
+    }
+    
+    return result;
+  }, [operations]);
+  
+  const scale = 2;
+  
+  const toCartesian = (p: [number, number, number]): [number, number, number] => {
+    const c = fractionalToCartesian(p[0], p[1], p[2], cell);
+    return c;
+  };
+  
+  const dirToCartesian = (p: [number, number, number]): [number, number, number] => {
+    const c1 = fractionalToCartesian(0, 0, 0, cell);
+    const c2 = fractionalToCartesian(p[0], p[1], p[2], cell);
+    const dir = [c2[0]-c1[0], c2[1]-c1[1], c2[2]-c1[2]];
+    const mag = Math.sqrt(dir[0]*dir[0] + dir[1]*dir[1] + dir[2]*dir[2]);
+    if (mag < 0.001) return [0, 0, 1];
+    return dir.map(v => v / mag) as [number, number, number];
+  };
+  
+  return (
+    <group>
+      {elements.map(({ element, idx }, i) => {
+        const isSelected = selectedOpIndex === idx;
+        
+        if (element.type === 'rotation' && element.axis && element.point) {
+          const axis = dirToCartesian(element.axis);
+          const point = toCartesian(element.point);
           return (
-            <mesh key={i} rotation={[0, 0, 0]} position={[0, 0, 0]}>
-              <planeGeometry args={[size, size]} />
-              <meshStandardMaterial color="#4488ff" transparent opacity={0.15} side={THREE.DoubleSide} />
-            </mesh>
+            <group key={i} onClick={(e) => { e.stopPropagation(); onSelectOperation?.(idx); }}>
+              <RotationAxis 
+                point={point} 
+                axis={axis} 
+                length={scale} 
+                color={isSelected ? '#ff0000' : '#ff4444'} 
+              />
+            </group>
           );
         }
+        
+        if (element.type === 'screw' && element.axis && element.point) {
+          const axis = dirToCartesian(element.axis);
+          const point = toCartesian(element.point);
+          return (
+            <group key={i} onClick={(e) => { e.stopPropagation(); onSelectOperation?.(idx); }}>
+              <ScrewAxis 
+                point={point} 
+                axis={axis} 
+                length={scale} 
+                color={isSelected ? '#ff6600' : '#ff8844'}
+                screwAmount={element.screw || 0}
+              />
+            </group>
+          );
+        }
+        
+        if (element.type === 'mirror' && element.normal && element.point) {
+          const normal = dirToCartesian(element.normal);
+          const point = toCartesian(element.point);
+          return (
+            <group key={i} onClick={(e) => { e.stopPropagation(); onSelectOperation?.(idx); }}>
+              <MirrorPlane 
+                point={point} 
+                normal={normal} 
+                size={scale} 
+                color={isSelected ? '#0066ff' : '#4488ff'} 
+              />
+            </group>
+          );
+        }
+        
+        if (element.type === 'glide' && element.normal && element.point) {
+          const normal = dirToCartesian(element.normal);
+          const point = toCartesian(element.point);
+          const glide = element.glide ? dirToCartesian(element.glide as [number, number, number]) : [0, 0, 0];
+          return (
+            <group key={i} onClick={(e) => { e.stopPropagation(); onSelectOperation?.(idx); }}>
+              <GlidePlane 
+                point={point} 
+                normal={normal}
+                glide={glide as [number, number, number]}
+                size={scale} 
+                color={isSelected ? '#00ff00' : '#44ff88'} 
+              />
+            </group>
+          );
+        }
+        
+        if (element.type === 'inversion' && element.point) {
+          const point = toCartesian(element.point);
+          return (
+            <group key={i} onClick={(e) => { e.stopPropagation(); onSelectOperation?.(idx); }}>
+              <InversionCenter 
+                point={point} 
+                color={isSelected ? '#ffff00' : '#ffff44'} 
+              />
+            </group>
+          );
+        }
+        
         return null;
+      })}
+    </group>
+  );
+}
+
+function SymmetryAnimation({ atoms, cell, operation, progress }: {
+  atoms: CrystalAtom[]; cell: CellParams; operation: any; progress: number;
+}) {
+  const animatedAtoms = useMemo(() => {
+    const result: { from: [number, number, number]; to: [number, number, number]; element: string }[] = [];
+    const R = operation.rotation;
+    const t = operation.translation;
+    
+    for (const atom of atoms) {
+      const fromCart = fractionalToCartesian(atom.x, atom.y, atom.z, cell);
+      
+      const nx = R[0][0] * atom.x + R[0][1] * atom.y + R[0][2] * atom.z + t[0];
+      const ny = R[1][0] * atom.x + R[1][1] * atom.y + R[1][2] * atom.z + t[1];
+      const nz = R[2][0] * atom.x + R[2][1] * atom.y + R[2][2] * atom.z + t[2];
+      
+      const fx = ((nx % 1) + 1) % 1;
+      const fy = ((ny % 1) + 1) % 1;
+      const fz = ((nz % 1) + 1) % 1;
+      
+      const toCart = fractionalToCartesian(fx, fy, fz, cell);
+      
+      result.push({
+        from: fromCart as [number, number, number],
+        to: toCart as [number, number, number],
+        element: atom.element,
+      });
+    }
+    
+    return result;
+  }, [atoms, cell, operation]);
+  
+  return (
+    <group>
+      {animatedAtoms.map((a, i) => {
+        const pos: [number, number, number] = [
+          a.from[0] + (a.to[0] - a.from[0]) * progress,
+          a.from[1] + (a.to[1] - a.from[1]) * progress,
+          a.from[2] + (a.to[2] - a.from[2]) * progress,
+        ];
+        const color = CPK_COLORS[a.element] || '#ff69b4';
+        return (
+          <mesh key={i} position={pos}>
+            <sphereGeometry args={[0.2, 12, 12]} />
+            <meshStandardMaterial color="#ffff00" emissive="#666600" transparent opacity={0.8} />
+          </mesh>
+        );
       })}
     </group>
   );
@@ -310,13 +758,39 @@ export default function App() {
   const [showSymmetryViz, setShowSymmetryViz] = useState(false);
   const [compareAtoms, setCompareAtoms] = useState<CrystalAtom[]>([]);
   const [compareCell, setCompareCell] = useState<CellParams | null>(null);
+  const [alignedAtoms, setAlignedAtoms] = useState<CrystalAtom[]>([]);
   const [rmsd, setRmsd] = useState<number | null>(null);
   const [wasmReady, setWasmReady] = useState(false);
   const [computing, setComputing] = useState(false);
+  const [selectedSymOp, setSelectedSymOp] = useState<number | null>(null);
+  const [animProgress, setAnimProgress] = useState(0);
+  const [isAnimating, setIsAnimating] = useState(false);
 
   useEffect(() => {
     initWasm().then(ok => setWasmReady(ok));
   }, []);
+  
+  useEffect(() => {
+    if (!isAnimating) return;
+    let animationId: number;
+    let lastTime = performance.now();
+    
+    const animate = (time: number) => {
+      const delta = time - lastTime;
+      lastTime = time;
+      setAnimProgress(prev => {
+        const next = prev + delta / 2000;
+        if (next >= 1) {
+          return 0;
+        }
+        return next;
+      });
+      animationId = requestAnimationFrame(animate);
+    };
+    
+    animationId = requestAnimationFrame(animate);
+    return () => cancelAnimationFrame(animationId);
+  }, [isAnimating]);
 
   const sg = getSpaceGroupByNumber(spaceGroupNum);
 
@@ -392,16 +866,12 @@ export default function App() {
   }, [crystalAtoms, cell]);
 
   const computeRMSD = useCallback(() => {
-    if (compareAtoms.length === 0 || crystalAtoms.length === 0) return;
-    const n = Math.min(compareAtoms.length, crystalAtoms.length);
-    let sumSq = 0;
-    for (let i = 0; i < n; i++) {
-      sumSq += (crystalAtoms[i].x - compareAtoms[i].x) ** 2 +
-               (crystalAtoms[i].y - compareAtoms[i].y) ** 2 +
-               (crystalAtoms[i].z - compareAtoms[i].z) ** 2;
-    }
-    setRmsd(Math.sqrt(sumSq / n));
-  }, [crystalAtoms, compareAtoms]);
+    if (compareAtoms.length === 0 || crystalAtoms.length === 0 || !compareCell) return;
+    
+    const result = kabschAlignment(crystalAtoms, compareAtoms, cell, compareCell);
+    setRmsd(result.rmsd);
+    setAlignedAtoms(result.rotatedAtoms2);
+  }, [crystalAtoms, compareAtoms, cell, compareCell]);
 
   const selectedAtomInfo = useMemo(() => {
     if (selectedAtom === null || crystalAtoms.length === 0) return null;
@@ -596,7 +1066,7 @@ export default function App() {
 
           {activeTab === 'structure' && (
             <div style={{ flex: 1, background: '#0d1117' }}>
-              <Canvas camera={{ position: [8, 8, 8], fov: 50 }} onClick={() => setSelectedAtom(null)}>
+              <Canvas camera={{ position: [8, 8, 8], fov: 50 }} onClick={() => { setSelectedAtom(null); setSelectedSymOp(null); }}>
                 <CrystalScene
                   atoms={crystalAtoms}
                   cell={cell}
@@ -607,8 +1077,46 @@ export default function App() {
                   selectedAtom={selectedAtom}
                   onSelectAtom={setSelectedAtom}
                 />
-                {showSymmetryViz && sg && <SymmetryViz3D operations={sg.operations} cell={cell} />}
+                {showSymmetryViz && sg && (
+                  <SymmetryViz3D 
+                    operations={sg.operations} 
+                    cell={cell}
+                    selectedOpIndex={selectedSymOp}
+                    onSelectOperation={(idx) => {
+                      setSelectedSymOp(idx);
+                      setAnimProgress(0);
+                      setIsAnimating(true);
+                    }}
+                  />
+                )}
+                {isAnimating && selectedSymOp !== null && sg && (
+                  <SymmetryAnimation 
+                    atoms={crystalAtoms}
+                    cell={cell}
+                    operation={sg.operations[selectedSymOp]}
+                    progress={animProgress}
+                  />
+                )}
               </Canvas>
+              {isAnimating && (
+                <div style={{ position: 'absolute', bottom: 20, left: '50%', transform: 'translateX(-50%)', background: '#161b22', padding: '8px 16px', borderRadius: 6, border: '1px solid #30363d' }}>
+                  <div style={{ fontSize: 12, color: '#8b949e', marginBottom: 4 }}>Symmetry Operation Animation</div>
+                  <input 
+                    type="range" 
+                    min={0} 
+                    max={100} 
+                    value={animProgress * 100} 
+                    onChange={e => { setAnimProgress(+e.target.value / 100); setIsAnimating(false); }}
+                    style={{ width: 200 }}
+                  />
+                  <button 
+                    style={{ marginLeft: 8, padding: '2px 8px', fontSize: 11 }}
+                    onClick={() => setIsAnimating(!isAnimating)}
+                  >
+                    {isAnimating ? 'Pause' : 'Play'}
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
@@ -714,26 +1222,54 @@ export default function App() {
                 )}
               </div>
               {compareAtoms.length > 0 && (
-                <div style={{ height: 300, marginTop: 8 }}>
+                <div style={{ height: 350, marginTop: 8 }}>
                   <Canvas camera={{ position: [8, 8, 8], fov: 50 }}>
                     <ambientLight intensity={0.4} />
                     <directionalLight position={[10, 10, 10]} intensity={0.8} />
+                    <UnitCellFrame cell={cell} />
                     {crystalAtoms.map((a, i) => {
                       const cart = fractionalToCartesian(a.x, a.y, a.z, cell);
-                      const isDiff = i < compareAtoms.length && (
-                        Math.abs(a.x - compareAtoms[i].x) > 0.01 ||
-                        Math.abs(a.y - compareAtoms[i].y) > 0.01 ||
-                        Math.abs(a.z - compareAtoms[i].z) > 0.01
-                      );
+                      const compareSet = alignedAtoms.length > 0 ? alignedAtoms : compareAtoms;
+                      const compCell: CellParams | null = alignedAtoms.length > 0 ? cell : compareCell;
+                      let isDiff = true;
+                      if (i < compareSet.length && compCell) {
+                        const c1 = fractionalToCartesian(a.x, a.y, a.z, cell);
+                        const c2 = fractionalToCartesian(compareSet[i].x, compareSet[i].y, compareSet[i].z, compCell);
+                        const dist = Math.sqrt((c1[0]-c2[0])**2 + (c1[1]-c2[1])**2 + (c1[2]-c2[2])**2);
+                        isDiff = dist > 0.1;
+                      }
                       return (
                         <mesh key={`c${i}`} position={cart}>
-                          <sphereGeometry args={[isDiff ? 0.3 : 0.15, 8, 8]} />
-                          <meshStandardMaterial color={isDiff ? '#ff4444' : (CPK_COLORS[a.element] || '#ff69b4')} />
+                          <sphereGeometry args={[isDiff ? 0.25 : 0.15, 8, 8]} />
+                          <meshStandardMaterial color={isDiff ? '#ff4444' : (CPK_COLORS[a.element] || '#ff69b4')} transparent opacity={0.8} />
+                        </mesh>
+                      );
+                    })}
+                    {alignedAtoms.length > 0 && alignedAtoms.map((a, i) => {
+                      const cart = fractionalToCartesian(a.x, a.y, a.z, cell);
+                      return (
+                        <mesh key={`a${i}`} position={cart}>
+                          <sphereGeometry args={[0.12, 8, 8]} />
+                          <meshStandardMaterial color="#44aaff" transparent opacity={0.6} />
+                        </mesh>
+                      );
+                    })}
+                    {alignedAtoms.length === 0 && compareAtoms.map((a, i) => {
+                      if (!compareCell) return null;
+                      const cart = fractionalToCartesian(a.x, a.y, a.z, compareCell);
+                      return (
+                        <mesh key={`r${i}`} position={cart}>
+                          <sphereGeometry args={[0.12, 8, 8]} />
+                          <meshStandardMaterial color="#44aaff" transparent opacity={0.6} />
                         </mesh>
                       );
                     })}
                     <OrbitControls />
                   </Canvas>
+                  <div style={{ fontSize: 11, color: '#8b949e', marginTop: 4, display: 'flex', gap: 16 }}>
+                    <span><span style={{ display: 'inline-block', width: 10, height: 10, background: '#ff4444', borderRadius: '50%', marginRight: 4 }}></span>Current (diff)</span>
+                    <span><span style={{ display: 'inline-block', width: 10, height: 10, background: '#44aaff', borderRadius: '50%', marginRight: 4 }}></span>Reference (aligned)</span>
+                  </div>
                 </div>
               )}
             </div>
@@ -755,14 +1291,41 @@ export default function App() {
               </div>
               <div style={panelStyle}>
                 <h3 style={{ margin: '0 0 8px', color: '#58a6ff' }}>Symmetry Operations</h3>
+                <p style={{ fontSize: 11, color: '#8b949e', margin: '0 0 8px' }}>
+                  Click an operation to animate atom mapping (switch to 3D Structure tab to view)
+                </p>
                 {sg && (
-                  <div style={{ maxHeight: 300, overflowY: 'auto' }}>
+                  <div style={{ maxHeight: 250, overflowY: 'auto' }}>
                     {sg.operations.map((op, i) => {
                       const R = op.rotation;
                       const t = op.translation;
+                      const elem = analyzeSymmetryElement(op);
                       return (
-                        <div key={i} style={{ fontSize: 11, padding: '2px 0', borderBottom: '1px solid #21262d' }}>
-                          Op {i + 1}: R=[{R.flat().map(v => v.toFixed(0)).join(',')}] t=[{t.map(v => v.toFixed(2)).join(',')}]
+                        <div 
+                          key={i} 
+                          style={{ 
+                            fontSize: 11, 
+                            padding: '4px 6px', 
+                            borderBottom: '1px solid #21262d',
+                            cursor: 'pointer',
+                            background: selectedSymOp === i ? '#1f6feb33' : 'transparent',
+                          }}
+                          onClick={() => {
+                            setSelectedSymOp(i);
+                            setAnimProgress(0);
+                            setIsAnimating(true);
+                            setActiveTab('structure');
+                            setShowSymmetryViz(true);
+                          }}
+                          onMouseOver={e => e.currentTarget.style.background = selectedSymOp === i ? '#1f6feb55' : '#1f6feb22'}
+                          onMouseOut={e => e.currentTarget.style.background = selectedSymOp === i ? '#1f6feb33' : 'transparent'}
+                        >
+                          <div style={{ fontWeight: 600, color: selectedSymOp === i ? '#58a6ff' : '#c9d1d9' }}>
+                            Op {i + 1}: {elem.type}
+                          </div>
+                          <div style={{ color: '#8b949e', fontSize: 10 }}>
+                            R=[{R.flat().map(v => v.toFixed(0)).join(',')}] t=[{t.map(v => v.toFixed(2)).join(',')}]
+                          </div>
                         </div>
                       );
                     })}

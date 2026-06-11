@@ -36,14 +36,20 @@ const RfaceInv = [[0,0,1],[1,0,0],[0,1,0]];
 function genFromGenerators(generators: SymOp[]): SymOp[] {
   const ops: SymOp[] = [{ rotation: I(), translation: [0,0,0] }];
   const set = new Set<string>();
-  set.add('0,0,0');
+  const identityKey = '1,0,0,0,1,0,0,0,1;0,0,0';
+  set.add(identityKey);
   let changed = true;
-  while (changed) {
+  let iterations = 0;
+  const maxIterations = 1000;
+  while (changed && iterations < maxIterations) {
     changed = false;
+    iterations++;
     for (const op of [...ops]) {
       for (const g of generators) {
         const newOp = compose(g.rotation, op.rotation, g.translation, op.translation);
+        newOp.rotation = newOp.rotation.map(row => row.map(v => Math.round(v * 1000) / 1000));
         newOp.translation = newOp.translation.map(v => Math.round(v * 1000) / 1000);
+        newOp.translation = newOp.translation.map(v => ((v % 1) + 1) % 1);
         const key = newOp.rotation.flat().join(',') + ';' + newOp.translation.join(',');
         if (!set.has(key)) {
           set.add(key);
